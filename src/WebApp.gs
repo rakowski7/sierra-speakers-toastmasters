@@ -34,6 +34,8 @@ const WEBAPP_CONFIG_ = {
  * @return {HtmlOutput|TextOutput} HTML page or JSON response.
  */
 function doGet(e) {
+  // DEBUG: remove once identity confirmed working
+  Logger.log('doGet: activeUser=' + Session.getActiveUser().getEmail() + ' effectiveUser=' + Session.getEffectiveUser().getEmail());
   const action = (e && e.parameter && e.parameter.action) || "";
 
   // ── JSON API endpoints ──
@@ -95,23 +97,50 @@ function normalizeEmail_(s) {
  * getCurrentUserEmail_
  * Returns the identified user's email (lowercased).
  *
- * Reads Session.getActiveUser().getEmail(). Under our deployment
- * (`Execute as: User accessing the web app` + Sheet shared with members
- * via a Google Group) this resolves to the visitor's own Google account
- * email for any signed-in user. We deliberately do NOT fall back to
- * Session.getEffectiveUser(), because that returns the deployer's email
- * (Mateusz) for every visitor and would silently grant admin to everyone.
+ * Identity source is `ScriptApp.getIdentityToken()`, which returns a
+ * signed JWT (header.payload.signature) whose `email` claim is the
+ * visitor's verified Google account email. This works for any signed-in
+ * Google account (including consumer @gmail.com), unlike
+ * `Session.getActiveUser().getEmail()`, which returns "" for consumer
+ * Gmail users when the deployment is configured as "Execute as: User
+ * accessing the web app" + "Who has access: Anyone with Google account".
+ *
+ * Requires the `openid` OAuth scope (declared in appsscript.json) and
+ * the `userinfo.email` scope for the `email` claim to be populated.
+ *
+ * We deliberately do NOT fall back to Session.getEffectiveUser(): that
+ * returns the deployer's email (Mateusz) for every visitor and would
+ * silently grant admin to everyone.
  *
  * @return {string} The visitor's email (lowercase), or "" if unidentified.
  */
 function getCurrentUserEmail_() {
-  var email = "";
   try {
-    email = Session.getActiveUser().getEmail();
-  } catch (e) {
-    // getActiveUser throws in some contexts; treat as unidentified.
+    var token = ScriptApp.getIdentityToken();
+    if (!token) {
+      // DEBUG: remove once identity confirmed working
+      Logger.log('getCurrentUserEmail_: no identity token returned');
+      return "";
+    }
+    var parts = token.split('.');
+    if (parts.length < 2) {
+      Logger.log('getCurrentUserEmail_: malformed identity token (parts=' + parts.length + ')');
+      return "";
+    }
+    // base64url-decode the JWT payload. Utilities.base64DecodeWebSafe
+    // handles the URL-safe alphabet and tolerates missing padding.
+    var payloadBytes = Utilities.base64DecodeWebSafe(parts[1]);
+    var payloadJson = Utilities.newBlob(payloadBytes).getDataAsString();
+    var payload = JSON.parse(payloadJson);
+    var email = normalizeEmail_(payload && payload.email);
+    // DEBUG: remove once identity confirmed working
+    Logger.log('getCurrentUserEmail_: tokenObtained=true email=' + email +
+               ' email_verified=' + (payload && payload.email_verified));
+    return email;
+  } catch (err) {
+    Logger.log('getIdentityToken failed: ' + err);
+    return "";
   }
-  return normalizeEmail_(email);
 }
 
 /**
@@ -420,6 +449,8 @@ function api_getMeetingDetails_(dateStr) {
  * @return {Object} { roles: [{ date, role, status }], ... }
  */
 function api_getMyRoles_() {
+  // DEBUG: remove once identity confirmed working
+  Logger.log('api_getMyRoles_: email=' + getCurrentUserEmail_());
   const email = getCurrentUserEmail_();
 
   const parsed = parseScheduleData_();
