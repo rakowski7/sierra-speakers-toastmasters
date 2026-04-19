@@ -1,0 +1,1460 @@
+<script>
+/**
+ * Sierra Speakers Toastmasters -- Mobile PWA Client-Side JavaScript
+ * Single-page app controller with view routing, data management, UI rendering,
+ * and admin wizard flows for confirmations, agenda generation, and club email.
+ */
+const App = (() => {
+  // ── State ──
+  let scheduleData = null;   // cached from api_getSchedule_
+  let myRolesData = null;    // cached from api_getMyRoles_
+  let currentView = "schedule";
+  let selectedAdminDate = "";
+
+  // ── Identity state ──
+  // Identity is resolved server-side via Session.getActiveUser() under
+  // "Execute as: User accessing the web app". `unidentified` is true
+  // when the server could not identify the visitor OR their email is
+  // not in the club's member directory. No name picker here — that
+  // would let any visitor impersonate anyone.
+  let unidentified = false;
+  let unidentifiedMessage = "";
+
+  // ── Wizard State ──
+  let wizardType = "";       // "confirmations" | "agenda" | "clubemail"
+  let wizardStep = 1;
+  let wizardTotalSteps = 5;
+  let wizardData = {};       // accumulated data across steps
+
+  // ── Helpers ──
+  function $(id) { return document.getElementById(id); }
+
+  function formatDateNice(dateStr) {
+    try {
+      const parts = dateStr.split("/");
+      const d = new Date(parseInt(parts[2]), parseInt(parts[0]) - 1, parseInt(parts[1]));
+      const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      return days[d.getDay()] + ", " + months[d.getMonth()] + " " + d.getDate();
+    } catch (e) { return dateStr; }
+  }
+
+  function formatDateShort(dateStr) {
+    try {
+      const parts = dateStr.split("/");
+      const d = new Date(parseInt(parts[2]), parseInt(parts[0]) - 1, parseInt(parts[1]));
+      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      return months[d.getMonth()] + " " + d.getDate();
+    } catch (e) { return dateStr; }
+  }
+
+  function formatDateLong(dateStr) {
+    try {
+      const parts = dateStr.split("/");
+      const d = new Date(parseInt(parts[2]), parseInt(parts[0]) - 1, parseInt(parts[1]));
+      const months = ["January", "February", "March", "April", "May", "June",
+                      "July", "August", "September", "October", "November", "December"];
+      const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+      return days[d.getDay()] + ", " + months[d.getMonth()] + " " + d.getDate() + ", " + d.getFullYear();
+    } catch (e) { return dateStr; }
+  }
+
+  function daysUntil(dateStr) {
+    try {
+      const parts = dateStr.split("/");
+      const d = new Date(parseInt(parts[2]), parseInt(parts[0]) - 1, parseInt(parts[1]));
+      const now = new Date(); now.setHours(0, 0, 0, 0); d.setHours(0, 0, 0, 0);
+      return Math.round((d - now) / (1000 * 60 * 60 * 24));
+    } catch (e) { return 999; }
+  }
+
+  function getRelativeLabel(dateStr) {
+    const days = daysUntil(dateStr);
+    if (days === 0) return "Today";
+    if (days === 1) return "Tomorrow";
+    if (days <= 6)  return "This Week";
+    if (days <= 13) return "Next Week";
+    return "In " + Math.ceil(days / 7) + " Weeks";
+  }
+
+  function statusIcon(status) {
+    switch (status) {
+      case "confirmed":  return '<div class="status-icon confirmed">&#10003;</div>';
+      case "emailed":    return '<div class="status-icon emailed">&#9993;</div>';
+      case "unable":     return '<div class="status-icon unable">&#10005;</div>';
+      default:           return '<div class="status-icon unconfirmed">?</div>';
+    }
+  }
+
+  // ── Toast Notification ──
+  function showToast(message, type) {
+    let toast = document.querySelector(".toast");
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.className = "toast";
+      document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.className = "toast " + (type || "");
+    requestAnimationFrame(() => {
+      toast.classList.add("show");
+    });
+    setTimeout(() => { toast.classList.remove("show"); }, 3000);
+  }
+
+  // ── View Navigation ──
+  function showView(viewName) {
+    currentView = viewName;
+    document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+    const target = $("view-" + viewName);
+    if (target) target.classList.add("active");
+
+    // Update nav buttons
+    document.querySelectorAll(".nav-btn").forEach(btn => {
+      btn.classList.toggle("active", btn.dataset.view === viewName);
+    });
+
+    // Load view-specific data
+    if (viewName === "schedule") renderSchedule();
+    if (viewName === "confirm") renderConfirmView();
+    if (viewName === "admin") renderAdminView();
+  }
+
+  // ── Data Loading ──
+  function loadData(callback) {
+    $("loading-screen").classList.add("active");
+    google.script.run
+      .withSuccessHandler(function (result) {
+        scheduleData = result;
+        google.script.run
+          .withSuccessHandler(function (rolesResult) {
+            myRolesData = rolesResult || { roles: [] };
+            unidentified = !!(rolesResult && rolesResult.unidentified);
+            unidentifiedMessage = (rolesResult && rolesResult.message) || "";
+            $("loading-screen").classList.remove("active");
+            if (callback) callback();
+          })
+          .withFailureHandler(function (err) {
+            myRolesData = { roles: [] };
+            unidentified = false;
+            unidentifiedMessage = "";
+            $("loading-screen").classList.remove("active");
+            if (callback) callback();
+          })
+          .getMyRoles();
+      })
+      .withFailureHandler(function (err) {
+        $("loading-screen").classList.remove("active");
+        showToast("Failed to load schedule: " + err.message, "error");
+      })
+      .getScheduleData();
+  }
+
+  function refresh() {
+    const btn = $("refresh-btn");
+    btn.classList.add("spinning");
+    loadData(function () {
+      btn.classList.remove("spinning");
+      showView(currentView);
+      showToast("Schedule updated", "success");
+    });
+  }
+
+  // ── RENDER: Schedule View ──
+  function renderSchedule() {
+    if (!scheduleData || !scheduleData.meetings) return;
+    const meetings = scheduleData.meetings;
+    const container = $("meetings-list");
+    const emptyState = $("empty-state");
+
+    if (meetings.length === 0) {
+      container.innerHTML = "";
+      emptyState.style.display = "block";
+      return;
+    }
+    emptyState.style.display = "none";
+
+    // My Roles banner
+    renderMyRolesBanner();
+
+    let html = "";
+    meetings.forEach((m, i) => {
+      const isNext = i === 0;
+      const label = getRelativeLabel(m.date);
+
+      // Count statuses (only assigned roles)
+      const counts = { confirmed: 0, emailed: 0, unconfirmed: 0, unable: 0 };
+      m.roles.forEach(r => {
+        var name = (r.name || "").trim();
+        if (name && name.toUpperCase() !== "TBD") counts[r.status] = (counts[r.status] || 0) + 1;
+      });
+
+      // Role chips preview (key roles only, skip unassigned)
+      const keyRoles = ["Toastmaster", "Table Topics Master", "General Evaluator", "Speech 1", "Speech 2", "Speech 3"];
+      const previewRoles = m.roles.filter(r => {
+        if (!keyRoles.includes(r.role)) return false;
+        var name = (r.name || "").trim();
+        return name && name.toUpperCase() !== "TBD";
+      });
+
+      html += '<div class="meeting-card" onclick="App.showMeeting(\'' + m.date + '\')">' +
+        '<div class="meeting-card-header"><div>' +
+        '<div class="meeting-date">' + formatDateNice(m.date) + '</div>' +
+        '</div><span class="meeting-badge ' + (isNext ? 'next' : 'upcoming') + '">' + label + '</span></div>' +
+        '<div class="meeting-card-body"><div class="meeting-meta">' +
+        (m.theme ? '<span class="meeting-theme-tag"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' + escapeHtml(m.theme) + '</span>' : '') +
+        '<span class="meta-item"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>' + escapeHtml(m.location || "TBD") + '</span>' +
+        '</div><div class="meeting-roles-preview">' +
+        previewRoles.map(r => '<span class="role-chip ' + r.status + '">' + r.role + ': ' + r.name + '</span>').join("") +
+        '</div></div>' +
+        '<div class="meeting-card-footer"><div class="status-summary">' +
+        (counts.confirmed ? '<span class="status-count"><span class="status-dot green"></span>' + counts.confirmed + ' confirmed</span>' : '') +
+        (counts.emailed ? '<span class="status-count"><span class="status-dot yellow"></span>' + counts.emailed + ' emailed</span>' : '') +
+        (counts.unconfirmed ? '<span class="status-count"><span class="status-dot gray"></span>' + counts.unconfirmed + ' pending</span>' : '') +
+        (counts.unable ? '<span class="status-count"><span class="status-dot red"></span>' + counts.unable + ' unable</span>' : '') +
+        '</div><span class="view-details-link">Details<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg></span></div></div>';
+    });
+    container.innerHTML = html;
+  }
+
+  function renderMyRolesBanner() {
+    const banner = $("my-roles-banner");
+    const list = $("my-roles-list");
+
+    // Server couldn't identify the visitor OR their email isn't in the
+    // directory → hide the banner entirely on the Schedule view.
+    // The Confirm view shows a clear explanation; keeping the Schedule
+    // clean avoids a noisy sign-in prompt for guests browsing the list.
+    if (unidentified) {
+      banner.style.display = "none";
+      return;
+    }
+
+    if (!myRolesData || !myRolesData.roles || myRolesData.roles.length === 0) {
+      banner.style.display = "none";
+      return;
+    }
+
+    banner.style.display = "block";
+    list.innerHTML = myRolesData.roles.map(r => {
+      const isConfirmed = r.status === "confirmed";
+      return '<div class="my-role-item"><div class="my-role-info">' +
+        '<div class="my-role-name">' + escapeHtml(r.role) + '</div>' +
+        '<div class="my-role-date">' + formatDateShort(r.date) + (r.theme ? " - " + escapeHtml(r.theme) : "") + '</div>' +
+        '</div>' +
+        (isConfirmed
+          ? '<span class="confirm-btn confirmed">Confirmed</span>'
+          : '<button class="confirm-btn" onclick="event.stopPropagation(); App.confirmRole(\'' + r.date + '\', \'' + escapeHtml(r.role) + '\', this)">Confirm</button>'
+        ) + '</div>';
+    }).join("");
+  }
+
+  // ── RENDER: Meeting Details ──
+  function showMeeting(dateStr) {
+    if (!scheduleData || !scheduleData.meetings) return;
+    const meeting = scheduleData.meetings.find(m => m.date === dateStr);
+    if (!meeting) { showToast("Meeting not found", "error"); return; }
+
+    const container = $("meeting-details");
+
+    // Filter out unassigned (TBD/empty) roles and legend rows
+    const assignedRoles = meeting.roles.filter(r => {
+      var name = (r.name || "").trim();
+      if (!name || name.toUpperCase() === "TBD") return false;
+      var rl = (r.role || "").trim().toLowerCase();
+      if (/^(green|berry|red\s*text|yellow)\s*=/.test(rl)) return false;
+      return true;
+    });
+
+    // Group roles into sections
+    const leadership = [];
+    const speeches = [];
+    const evaluators = [];
+    const functional = [];
+
+    assignedRoles.forEach(r => {
+      const rl = r.role.toLowerCase();
+      if (rl === "toastmaster" || rl === "general evaluator") leadership.push(r);
+      else if (rl.startsWith("speech")) speeches.push(r);
+      else if (rl.startsWith("evaluator")) evaluators.push(r);
+      else functional.push(r);
+    });
+
+    function renderSection(title, roles) {
+      if (roles.length === 0) return "";
+      return '<div class="roles-section" style="margin-bottom:12px;">' +
+        '<div class="roles-section-header">' + title + '</div>' +
+        roles.map(r =>
+          '<div class="role-row">' +
+          '<span class="role-label">' + escapeHtml(r.role) + '</span>' +
+          '<span class="role-name" style="' + (r.name === 'TBD' ? 'color:var(--text-muted);font-style:italic;' : '') + '">' + escapeHtml(r.name) + '</span>' +
+          '<span class="role-status-icon">' + statusIcon(r.status) + '</span>' +
+          '</div>'
+        ).join("") +
+        '</div>';
+    }
+
+    container.innerHTML =
+      '<div class="meeting-detail-header">' +
+      '<div class="meeting-detail-date">' + formatDateNice(meeting.date) + '</div>' +
+      '<div class="meeting-detail-meta">' +
+      (meeting.theme ? '<div class="detail-meta-row"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>Theme: <strong>' + escapeHtml(meeting.theme) + '</strong></span></div>' : '') +
+      '<div class="detail-meta-row"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg><span>' + escapeHtml(meeting.location || "TBD") + '</span></div>' +
+      (meeting.format ? '<div class="detail-meta-row"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><span>Format: <strong>' + escapeHtml(meeting.format) + '</strong></span></div>' : '') +
+      '</div></div>' +
+      renderSection("Leadership", leadership) +
+      renderSection("Prepared Speeches", speeches) +
+      renderSection("Evaluators", evaluators) +
+      renderSection("Functional Roles", functional);
+
+    showView("meeting");
+  }
+
+  // ── RENDER: Confirm View ──
+  function renderConfirmView() {
+    const container = $("confirm-content");
+
+    // Server couldn't identify us OR our email isn't in the directory.
+    // Show a clean message — NO name picker, NO role-selection UI
+    // (those let visitors impersonate anyone in the directory).
+    if (unidentified) {
+      container.innerHTML =
+        '<div class="section-header" style="margin-top:4px;">' +
+        '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' +
+        '<h2>We couldn\'t identify you</h2></div>' +
+        '<div class="confirm-section">' +
+        '<p style="font-size:14px;color:var(--text-secondary);margin-bottom:12px;">' +
+        escapeHtml(unidentifiedMessage ||
+          "We couldn't identify you. Make sure you're signed into the Google account on file with the club.") +
+        '</p>' +
+        '<p style="font-size:13px;color:var(--text-muted);">If you think your account should be on file, contact Mateusz (<a href="mailto:rakowski.7@gmail.com">rakowski.7@gmail.com</a>).</p>' +
+        '</div>';
+      renderAllRolesSection();
+      return;
+    }
+
+    if (!myRolesData || !myRolesData.roles || myRolesData.roles.length === 0) {
+      container.innerHTML =
+        '<div class="no-roles-message">' +
+        '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>' +
+        '<p>You have no upcoming role assignments.</p>' +
+        '<p style="margin-top:8px;font-size:12px;color:var(--text-muted);">' +
+        (myRolesData && myRolesData.message ? escapeHtml(myRolesData.message) : "Check the schedule for open roles.") + '</p></div>';
+      renderAllRolesSection();
+      return;
+    }
+
+    container.innerHTML =
+      '<div class="section-header" style="margin-top:4px;">' +
+      '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>' +
+      '<h2>Your Roles</h2></div>' +
+      myRolesData.roles.map(r => {
+        const isConfirmed = r.status === "confirmed";
+        return '<div class="confirm-section"><div class="confirm-role-card">' +
+          '<div class="confirm-role-title">' + escapeHtml(r.role) + '</div>' +
+          '<div class="confirm-role-meeting">' + formatDateNice(r.date) + (r.theme ? " - " + escapeHtml(r.theme) : "") + '</div></div>' +
+          (isConfirmed
+            ? '<div class="confirm-success"><div class="check-circle"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div><h3>Confirmed!</h3><p>Your cell is green in the schedule. You are all set.</p></div>'
+            : '<button class="confirm-action-btn primary" onclick="App.confirmRole(\'' + r.date + '\', \'' + escapeHtml(r.role) + '\', this)">Confirm My Attendance</button><p style="text-align:center;margin-top:8px;font-size:12px;color:var(--text-secondary);">This will mark your cell green in the schedule sheet.</p>'
+          ) + '</div>';
+      }).join("");
+
+    // Render the All Roles section below
+    renderAllRolesSection();
+  }
+
+  // ── RENDER: All Roles Section (within My Roles tab) ──
+  function renderAllRolesSection() {
+    var section = $("all-roles-section");
+    var dropdown = $("all-roles-date-select");
+    var listContainer = $("all-roles-list");
+
+    if (!scheduleData || !scheduleData.meetings || scheduleData.meetings.length === 0) {
+      section.style.display = "none";
+      return;
+    }
+
+    section.style.display = "block";
+    var meetings = scheduleData.meetings;
+
+    // Populate dropdown with meeting dates
+    dropdown.innerHTML = meetings.map(function (m) {
+      return '<option value="' + m.date + '">' + formatDateNice(m.date) +
+        (m.theme ? ' - ' + escapeHtml(m.theme) : '') + '</option>';
+    }).join("");
+
+    // Default to first (next upcoming) meeting
+    renderAllRolesForDate(meetings[0].date);
+  }
+
+  function allRolesDateChanged(dateStr) {
+    renderAllRolesForDate(dateStr);
+  }
+
+  function renderAllRolesForDate(dateStr) {
+    var listContainer = $("all-roles-list");
+    if (!scheduleData || !scheduleData.meetings) return;
+
+    var meeting = scheduleData.meetings.find(function (m) { return m.date === dateStr; });
+    if (!meeting) {
+      listContainer.innerHTML = '<div class="all-roles-empty">No meeting data found for this date.</div>';
+      return;
+    }
+
+    // Filter out unassigned (TBD/empty) roles and legend rows
+    var assignedRoles = meeting.roles.filter(function (r) {
+      var name = (r.name || "").trim();
+      if (!name || name.toUpperCase() === "TBD") return false;
+      var rl = (r.role || "").trim().toLowerCase();
+      if (/^(green|berry|red\s*text|yellow)\s*=/.test(rl)) return false;
+      return true;
+    });
+
+    if (assignedRoles.length === 0) {
+      listContainer.innerHTML = '<div class="all-roles-empty">No assigned roles for this meeting.</div>';
+      return;
+    }
+
+    // Group roles into sections (same as meeting detail view)
+    var leadership = [];
+    var speeches = [];
+    var evaluators = [];
+    var functional = [];
+
+    assignedRoles.forEach(function (r) {
+      var rl = r.role.toLowerCase();
+      if (rl === "toastmaster" || rl === "general evaluator") leadership.push(r);
+      else if (rl.startsWith("speech")) speeches.push(r);
+      else if (rl.startsWith("evaluator")) evaluators.push(r);
+      else functional.push(r);
+    });
+
+    function statusDotClass(status) {
+      if (status === "confirmed") return "green";
+      if (status === "emailed") return "yellow";
+      if (status === "unable") return "red";
+      return "gray";
+    }
+
+    function renderGroup(title, roles) {
+      if (roles.length === 0) return "";
+      return '<div class="all-roles-group">' +
+        '<div class="all-roles-group-header">' + title + '</div>' +
+        roles.map(function (r) {
+          return '<div class="all-roles-row">' +
+            '<div class="all-roles-dot ' + statusDotClass(r.status) + '"></div>' +
+            '<span class="all-roles-role-label">' + escapeHtml(r.role) + '</span>' +
+            '<span class="all-roles-person">' + escapeHtml(r.name) + '</span>' +
+            '</div>';
+        }).join("") +
+        '</div>';
+    }
+
+    listContainer.innerHTML =
+      renderGroup("Leadership", leadership) +
+      renderGroup("Prepared Speeches", speeches) +
+      renderGroup("Evaluators", evaluators) +
+      renderGroup("Functional Roles", functional);
+  }
+
+  // ── Confirm Role Action ──
+  function confirmRole(date, role, btnEl) {
+    if (btnEl) {
+      btnEl.disabled = true;
+      btnEl.textContent = "Confirming...";
+    }
+    var successHandler = function (result) {
+      if (result.error) {
+        showToast(result.error, "error");
+        if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Confirm"; }
+        return;
+      }
+      showToast("Role confirmed! Your cell is now green.", "success");
+      loadData(function () { showView(currentView); });
+    };
+    var failureHandler = function (err) {
+      showToast("Error: " + err.message, "error");
+      if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Confirm"; }
+    };
+
+    google.script.run
+      .withSuccessHandler(successHandler)
+      .withFailureHandler(failureHandler)
+      .confirmRole(date, role);
+  }
+
+  // ── RENDER: Admin View ──
+  function renderAdminView() {
+    // Admin view is now static buttons that launch wizards
+    // No dynamic rendering needed
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // WIZARD ENGINE
+  // ═══════════════════════════════════════════════════════════
+
+  function startWizard(type) {
+    wizardType = type;
+    wizardStep = 1;
+    wizardData = {};
+
+    if (type === "confirmations") wizardTotalSteps = 5;
+    else if (type === "agenda") wizardTotalSteps = 5;
+    else if (type === "clubemail") wizardTotalSteps = 3;
+
+    showView("wizard");
+    renderWizardStep();
+  }
+
+  function wizardBack() {
+    if (wizardStep > 1) {
+      wizardStep--;
+      renderWizardStep();
+    } else {
+      showView("admin");
+    }
+  }
+
+  function wizardNext() {
+    // Collect data from current step before advancing
+    collectWizardStepData();
+    wizardStep++;
+    renderWizardStep();
+  }
+
+  function collectWizardStepData() {
+    // Each wizard type collects differently per step
+    if (wizardType === "confirmations") collectConfirmationsData();
+    else if (wizardType === "agenda") collectAgendaStepData();
+    else if (wizardType === "clubemail") collectClubEmailData();
+  }
+
+  function renderWizardStep() {
+    // Update progress
+    const pct = Math.round((wizardStep / wizardTotalSteps) * 100);
+    $("wizard-progress-fill").style.width = pct + "%";
+    $("wizard-step-label").textContent = "Step " + wizardStep + " of " + wizardTotalSteps;
+    $("wizard-back-label").textContent = wizardStep === 1 ? "Admin" : "Back";
+
+    // Titles
+    const titles = {
+      confirmations: ["Select Meeting", "Role Status", "Meeting Details", "Preview", "Send"],
+      agenda: ["Select Meeting", "Word of the Day", "Choose Definition", "Confirm Speeches", "Generate"],
+      clubemail: ["Email Details", "Preview Email", "Done"]
+    };
+    const stepTitles = titles[wizardType] || [];
+    $("wizard-title").textContent = stepTitles[wizardStep - 1] || "";
+
+    // Render step content
+    if (wizardType === "confirmations") renderConfirmationsStep();
+    else if (wizardType === "agenda") renderAgendaStep();
+    else if (wizardType === "clubemail") renderClubEmailStep();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // WIZARD: Role Confirmations
+  // ═══════════════════════════════════════════════════════════
+
+  function collectConfirmationsData() {
+    if (wizardStep === 1) {
+      const sel = $("wz-date-select");
+      if (sel) wizardData.selectedDate = sel.value;
+    } else if (wizardStep === 3) {
+      const themeEl = $("wz-theme");
+      const wotdEl = $("wz-wotd");
+      const introEl = $("wz-intro-q");
+      const addrEl = $("wz-address");
+      if (themeEl) wizardData.theme = themeEl.value.trim();
+      if (wotdEl) wizardData.wotd = wotdEl.value.trim();
+      if (introEl) wizardData.introQuestion = introEl.value.trim();
+      if (addrEl) wizardData.meetingAddress = addrEl.value.trim();
+      const fmtRadio = document.querySelector('input[name="wz-format"]:checked');
+      if (fmtRadio) wizardData.meetingFormat = fmtRadio.value;
+      const senderRadio = document.querySelector('input[name="wz-sender"]:checked');
+      if (senderRadio) wizardData.senderType = senderRadio.value;
+      const senderNameEl = $("wz-sender-name");
+      if (senderNameEl) wizardData.senderName = senderNameEl.value.trim();
+    }
+  }
+
+  function renderConfirmationsStep() {
+    const body = $("wizard-body");
+
+    if (wizardStep === 1) {
+      // Step 1: Select meeting date
+      if (!scheduleData || !scheduleData.meetings || scheduleData.meetings.length === 0) {
+        body.innerHTML = '<div class="wz-card"><p>No upcoming meetings found. Please refresh.</p></div>';
+        return;
+      }
+      const meetings = scheduleData.meetings;
+      const selected = wizardData.selectedDate || meetings[0].date;
+      body.innerHTML =
+        '<div class="wz-card">' +
+        '<label class="wz-label">Meeting Date</label>' +
+        '<select class="wz-select" id="wz-date-select">' +
+        meetings.map(m =>
+          '<option value="' + m.date + '"' + (m.date === selected ? ' selected' : '') + '>' +
+          formatDateNice(m.date) + (m.theme ? ' - ' + escapeHtml(m.theme) : '') + '</option>'
+        ).join("") +
+        '</select></div>' +
+        '<div class="wz-btn-row"><button class="wz-btn wz-btn-primary" onclick="App.wizardNext()">Next</button></div>';
+
+    } else if (wizardStep === 2) {
+      // Step 2: Show role statuses (loading from backend)
+      body.innerHTML = '<div class="wz-loading"><div class="loading-spinner"></div><p class="wz-loading-text">Loading role confirmations...</p></div>';
+      google.script.run
+        .withSuccessHandler(function (result) {
+          if (result.error) {
+            body.innerHTML = '<div class="wz-card"><p style="color:var(--red-text);">' + escapeHtml(result.error) + '</p></div>';
+            return;
+          }
+          wizardData.confirmationResult = result;
+          wizardData.theme = wizardData.theme || result.theme || "";
+          wizardData.toastmasterName = result.toastmasterName || "";
+          wizardData.meetingFormat = result.meetingFormat || "undecided";
+          wizardData.cachedWod = result.cachedWod || "";
+          renderConfirmationRoles(result);
+        })
+        .withFailureHandler(function (err) {
+          body.innerHTML = '<div class="wz-card"><p style="color:var(--red-text);">Error: ' + escapeHtml(err.message) + '</p></div>';
+        })
+        .getConfirmationData(wizardData.selectedDate);
+
+    } else if (wizardStep === 3) {
+      // Step 3: Form for meeting details
+      renderConfirmationForm();
+
+    } else if (wizardStep === 4) {
+      // Step 4: Preview
+      renderConfirmationPreview();
+
+    } else if (wizardStep === 5) {
+      // Step 5: Send
+      renderConfirmationSend();
+    }
+  }
+
+  function renderConfirmationRoles(result) {
+    const body = $("wizard-body");
+    const roles = result.roles || [];
+    const counts = { confirmed: 0, emailed: 0, unconfirmed: 0, unable: 0 };
+    roles.forEach(r => {
+      if (r.name && r.name !== "TBD") {
+        counts[r.status] = (counts[r.status] || 0) + 1;
+      }
+    });
+
+    body.innerHTML =
+      '<div class="wz-card">' +
+      '<div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;">' +
+      (counts.confirmed ? '<span class="status-count"><span class="status-dot green"></span>' + counts.confirmed + ' confirmed</span>' : '') +
+      (counts.emailed ? '<span class="status-count"><span class="status-dot yellow"></span>' + counts.emailed + ' emailed</span>' : '') +
+      (counts.unconfirmed ? '<span class="status-count"><span class="status-dot gray"></span>' + counts.unconfirmed + ' pending</span>' : '') +
+      (counts.unable ? '<span class="status-count"><span class="status-dot red"></span>' + counts.unable + ' unable</span>' : '') +
+      '</div>' +
+      roles.map(r =>
+        '<div class="wz-role-row">' +
+        '<div class="wz-role-info">' +
+        '<div class="wz-role-name">' + escapeHtml(r.name || "TBD") + '</div>' +
+        '<div class="wz-role-detail">' + escapeHtml(r.role) + (r.email ? '' : ' (no email)') + '</div>' +
+        '</div>' +
+        '<span class="wz-role-badge ' + r.status + '">' +
+        (r.status === "confirmed" ? "Confirmed" : r.status === "emailed" ? "Emailed" : r.status === "unable" ? "Unable" : "Pending") +
+        '</span></div>'
+      ).join("") +
+      '</div>' +
+      '<div class="wz-btn-row"><button class="wz-btn wz-btn-primary" onclick="App.wizardNext()">Next</button></div>';
+  }
+
+  function renderConfirmationForm() {
+    const body = $("wizard-body");
+    const theme = wizardData.theme || "";
+    const wotd = wizardData.wotd || wizardData.cachedWod || "";
+    const fmt = wizardData.meetingFormat || "undecided";
+    const tmName = wizardData.toastmasterName || "";
+
+    body.innerHTML =
+      '<div class="wz-card">' +
+      '<label class="wz-label">Meeting Theme</label>' +
+      '<input class="wz-input" id="wz-theme" value="' + escapeHtml(theme) + '" placeholder="Enter meeting theme">' +
+      '</div>' +
+
+      '<div class="wz-card">' +
+      '<label class="wz-label">Meeting Format</label>' +
+      '<div class="wz-radio-group">' +
+      ['hybrid', 'in_person', 'virtual', 'undecided'].map(v => {
+        var label = v === 'in_person' ? 'In Person' : v.charAt(0).toUpperCase() + v.slice(1);
+        return '<label class="wz-radio-option' + (v === fmt ? ' selected' : '') + '" onclick="this.querySelector(\'input\').checked=true;document.querySelectorAll(\'.wz-radio-option\').forEach(o=>o.classList.remove(\'selected\'));this.classList.add(\'selected\')">' +
+          '<input type="radio" name="wz-format" value="' + v + '"' + (v === fmt ? ' checked' : '') + '>' +
+          '<span>' + label + '</span></label>';
+      }).join("") +
+      '</div></div>' +
+
+      '<div class="wz-card">' +
+      '<label class="wz-label">Word of the Day (optional)</label>' +
+      '<input class="wz-input" id="wz-wotd" value="' + escapeHtml(wotd) + '" placeholder="e.g. Resilient">' +
+      '</div>' +
+
+      '<div class="wz-card">' +
+      '<label class="wz-label">Who is sending these emails?</label>' +
+      '<div class="wz-radio-group">' +
+      '<label class="wz-radio-option selected" onclick="this.querySelector(\'input\').checked=true;document.querySelectorAll(\'[name=wz-sender]\').forEach(r=>{r.closest(\'.wz-radio-option\').classList.remove(\'selected\')});this.classList.add(\'selected\');var el=document.getElementById(\'wz-sender-name-row\');if(el)el.style.display=\'none\'">' +
+      '<input type="radio" name="wz-sender" value="tm" checked><span>' + escapeHtml(tmName || "Toastmaster") + '</span></label>' +
+      '<label class="wz-radio-option" onclick="this.querySelector(\'input\').checked=true;document.querySelectorAll(\'[name=wz-sender]\').forEach(r=>{r.closest(\'.wz-radio-option\').classList.remove(\'selected\')});this.classList.add(\'selected\');var el=document.getElementById(\'wz-sender-name-row\');if(el)el.style.display=\'block\'">' +
+      '<input type="radio" name="wz-sender" value="other"><span>Someone else</span></label>' +
+      '</div>' +
+      '<div id="wz-sender-name-row" style="display:none;margin-top:8px;">' +
+      '<input class="wz-input" id="wz-sender-name" placeholder="Enter sender name">' +
+      '</div></div>' +
+
+      '<div class="wz-card">' +
+      '<label class="wz-label">Speaker Intro Question (optional)</label>' +
+      '<input class="wz-input" id="wz-intro-q" value="' + escapeHtml(wizardData.introQuestion || "") + '" placeholder="e.g. What inspired you to pick this topic?">' +
+      '</div>' +
+
+      '<div class="wz-card">' +
+      '<label class="wz-label">Meeting Address</label>' +
+      '<input class="wz-input" id="wz-address" value="' + escapeHtml(wizardData.meetingAddress || "633 Folsom Street, San Francisco CA") + '">' +
+      '</div>' +
+
+      '<div class="wz-btn-row"><button class="wz-btn wz-btn-primary" onclick="App.wizardNext()">Preview</button></div>';
+  }
+
+  function renderConfirmationPreview() {
+    const body = $("wizard-body");
+    collectConfirmationsData(); // ensure step 3 data is saved before preview
+    const roles = wizardData.confirmationResult ? wizardData.confirmationResult.roles : [];
+    const eligible = roles.filter(r => r.roleType !== "toastmaster" && r.name && r.name.toUpperCase() !== "TBD" && r.email);
+    const fmtLabel = { hybrid: "Hybrid", in_person: "In Person", virtual: "Virtual", undecided: "Undecided" };
+
+    body.innerHTML =
+      '<div class="wz-preview">' +
+      '<div class="wz-preview-header">Confirmation Summary</div>' +
+      '<div class="wz-preview-row"><span class="wz-preview-label">Date</span><span class="wz-preview-value">' + formatDateNice(wizardData.selectedDate) + '</span></div>' +
+      '<div class="wz-preview-row"><span class="wz-preview-label">Theme</span><span class="wz-preview-value">' + escapeHtml(wizardData.theme || "(none)") + '</span></div>' +
+      '<div class="wz-preview-row"><span class="wz-preview-label">Format</span><span class="wz-preview-value">' + (fmtLabel[wizardData.meetingFormat] || "Undecided") + '</span></div>' +
+      (wizardData.wotd ? '<div class="wz-preview-row"><span class="wz-preview-label">Word of the Day</span><span class="wz-preview-value">' + escapeHtml(wizardData.wotd) + '</span></div>' : '') +
+      '<div class="wz-preview-row"><span class="wz-preview-label">Emails to draft</span><span class="wz-preview-value">' + eligible.length + ' members</span></div>' +
+      '<div class="wz-preview-row"><span class="wz-preview-label">Sender</span><span class="wz-preview-value">' + escapeHtml(wizardData.senderType === "tm" ? wizardData.toastmasterName : (wizardData.senderName || "")) + '</span></div>' +
+      '</div>' +
+
+      '<div class="wz-card">' +
+      '<label class="wz-label">Recipients</label>' +
+      eligible.map(r =>
+        '<div class="wz-role-row">' +
+        '<div class="wz-role-info">' +
+        '<div class="wz-role-name">' + escapeHtml(r.name) + '</div>' +
+        '<div class="wz-role-detail">' + escapeHtml(r.role) + '</div>' +
+        '</div>' +
+        '<span class="wz-role-badge ' + r.status + '">' + (r.status === "confirmed" ? "Confirmed" : "Pending") + '</span>' +
+        '</div>'
+      ).join("") +
+      '</div>' +
+
+      '<div class="wz-btn-row">' +
+      '<button class="wz-btn wz-btn-primary" onclick="App.wizardNext()">Create ' + eligible.length + ' Draft' + (eligible.length !== 1 ? 's' : '') + '</button>' +
+      '</div>';
+  }
+
+  function renderConfirmationSend() {
+    const body = $("wizard-body");
+    body.innerHTML = '<div class="wz-loading"><div class="loading-spinner"></div><p class="wz-loading-text">Creating email drafts in Gmail...</p></div>';
+
+    google.script.run
+      .withSuccessHandler(function (result) {
+        if (result.error) {
+          body.innerHTML =
+            '<div class="wz-error">' +
+            '<div class="wz-error-circle"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>' +
+            '<h3>Something went wrong</h3>' +
+            '<p>' + escapeHtml(result.error) + '</p>' +
+            '</div>' +
+            '<div class="wz-btn-row"><button class="wz-btn wz-btn-outline" onclick="App.showView(\'admin\')">Back to Admin</button></div>';
+          return;
+        }
+        body.innerHTML =
+          '<div class="wz-success">' +
+          '<div class="wz-success-circle"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div>' +
+          '<h3>Drafts Created!</h3>' +
+          '<p>' + (result.draftsCreated || 0) + ' email draft' + ((result.draftsCreated || 0) !== 1 ? 's' : '') + ' saved to Gmail.</p>' +
+          '<p style="margin-top:8px;"><a href="' + (result.draftsUrl || 'https://mail.google.com/mail/#drafts') + '" target="_blank">Open Gmail Drafts</a></p>' +
+          '</div>' +
+          '<div class="wz-btn-row"><button class="wz-btn wz-btn-outline" onclick="App.showView(\'admin\')">Done</button></div>';
+      })
+      .withFailureHandler(function (err) {
+        body.innerHTML =
+          '<div class="wz-error">' +
+          '<div class="wz-error-circle"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>' +
+          '<h3>Error</h3><p>' + escapeHtml(err.message) + '</p></div>' +
+          '<div class="wz-btn-row"><button class="wz-btn wz-btn-outline" onclick="App.showView(\'admin\')">Back to Admin</button></div>';
+      })
+      .sendRoleConfirmations({
+        dateStr: wizardData.selectedDate,
+        theme: wizardData.theme || "",
+        wotd: wizardData.wotd || "",
+        meetingFormat: wizardData.meetingFormat || "undecided",
+        meetingAddress: wizardData.meetingAddress || "633 Folsom Street, San Francisco CA",
+        senderType: wizardData.senderType || "tm",
+        senderName: wizardData.senderName || "",
+        introQuestion: wizardData.introQuestion || ""
+      });
+  }
+
+
+  // ═══════════════════════════════════════════════════════════
+  // WIZARD: Generate Agenda
+  // ═══════════════════════════════════════════════════════════
+
+  function collectAgendaStepData() {
+    if (wizardStep === 1) {
+      var sel = $("wz-date-select");
+      if (sel) wizardData.selectedDate = sel.value;
+    } else if (wizardStep === 2) {
+      var wordEl = $("wz-wotd-word");
+      if (wordEl) wizardData.wordOfTheDay = wordEl.value.trim();
+    } else if (wizardStep === 3) {
+      // Definition is collected via selectWodDef
+    } else if (wizardStep === 4) {
+      // Speeches collected via checkboxes
+      collectSpeechSelections();
+    }
+  }
+
+  function collectSpeechSelections() {
+    if (!wizardData.agendaResult) return;
+    var speeches = wizardData.agendaResult.speeches || [];
+    var kept = [];
+    speeches.forEach(function (s, i) {
+      var cb = $("wz-speech-cb-" + i);
+      if (cb && cb.checked) kept.push(s.key);
+    });
+    wizardData.keptSpeechKeys = kept;
+
+    // Auto-map evaluators
+    var evals = wizardData.agendaResult.evaluators || [];
+    var keptNums = {};
+    kept.forEach(function (k) { keptNums[k.replace("Speech ", "")] = true; });
+    var keptEvals = [];
+    evals.forEach(function (e) {
+      var num = e.key.replace("Evaluator ", "");
+      if (keptNums[num]) keptEvals.push(e.key);
+    });
+    wizardData.keptEvaluatorKeys = keptEvals;
+  }
+
+  function renderAgendaStep() {
+    var body = $("wizard-body");
+
+    if (wizardStep === 1) {
+      // Step 1: Select meeting date
+      if (!scheduleData || !scheduleData.meetings || scheduleData.meetings.length === 0) {
+        body.innerHTML = '<div class="wz-card"><p>No upcoming meetings found.</p></div>';
+        return;
+      }
+      var meetings = scheduleData.meetings;
+      var selected = wizardData.selectedDate || meetings[0].date;
+      body.innerHTML =
+        '<div class="wz-card">' +
+        '<label class="wz-label">Meeting Date</label>' +
+        '<select class="wz-select" id="wz-date-select">' +
+        meetings.map(function (m) {
+          return '<option value="' + m.date + '"' + (m.date === selected ? ' selected' : '') + '>' +
+            formatDateNice(m.date) + (m.theme ? ' - ' + escapeHtml(m.theme) : '') + '</option>';
+        }).join("") +
+        '</select></div>' +
+        '<div class="wz-btn-row"><button class="wz-btn wz-btn-primary" onclick="App.agendaLoadData()">Next</button></div>';
+
+    } else if (wizardStep === 2) {
+      // Step 2: Word of the Day input
+      var cachedWord = wizardData.cachedWod || wizardData.wordOfTheDay || "";
+      body.innerHTML =
+        '<div class="wz-card">' +
+        '<label class="wz-label">Word of the Day</label>' +
+        '<input class="wz-input" id="wz-wotd-word" value="' + escapeHtml(cachedWord) + '" placeholder="Type a word here (or leave blank to skip)">' +
+        '<p class="wz-hint">The word will appear on the agenda. Leave blank to skip.</p>' +
+        '</div>' +
+        '<div class="wz-btn-row">' +
+        '<button class="wz-btn wz-btn-outline" onclick="App.agendaSkipWod()">Skip</button>' +
+        '<button class="wz-btn wz-btn-primary" onclick="App.agendaLookupWod()">Look Up Definitions</button>' +
+        '</div>';
+
+    } else if (wizardStep === 3) {
+      // Step 3: Definition picker (rendered by agendaLookupWod or agendaSkipWod)
+      if (!wizardData.definitions || wizardData.definitions.length === 0) {
+        // No definitions available
+        body.innerHTML =
+          '<div class="wz-card"><p>No definitions found. The word will appear without a definition.</p></div>' +
+          '<div class="wz-btn-row"><button class="wz-btn wz-btn-primary" onclick="App.wizardNext()">Continue</button></div>';
+      } else {
+        renderWodPicker();
+      }
+
+    } else if (wizardStep === 4) {
+      // Step 4: Speech confirmation
+      renderSpeechConfirmation();
+
+    } else if (wizardStep === 5) {
+      // Step 5: Generate
+      renderAgendaGenerate();
+    }
+  }
+
+  function agendaLoadData() {
+    collectAgendaStepData();
+    wizardStep = 2;
+    var body = $("wizard-body");
+    body.innerHTML = '<div class="wz-loading"><div class="loading-spinner"></div><p class="wz-loading-text">Loading agenda data...</p></div>';
+
+    google.script.run
+      .withSuccessHandler(function (result) {
+        if (result.error) {
+          body.innerHTML = '<div class="wz-card"><p style="color:var(--red-text);">' + escapeHtml(result.error) + '</p></div>';
+          return;
+        }
+        wizardData.agendaResult = result;
+        wizardData.cachedWod = result.cachedWod || "";
+        wizardData.theme = result.theme || "";
+        renderWizardStep();
+      })
+      .withFailureHandler(function (err) {
+        body.innerHTML = '<div class="wz-card"><p style="color:var(--red-text);">Error: ' + escapeHtml(err.message) + '</p></div>';
+      })
+      .getAgendaData(wizardData.selectedDate);
+  }
+
+  function agendaSkipWod() {
+    var wordEl = $("wz-wotd-word");
+    wizardData.wordOfTheDay = wordEl ? wordEl.value.trim() : "";
+    wizardData.definitions = [];
+    wizardData.wotdDefinition = "";
+    wizardData.wotdPronunciation = "";
+    wizardData.wotdPartOfSpeech = "";
+    wizardData.wotdExample = "";
+    wizardData.wotdSource = "";
+    wizardStep = 4; // skip to speeches
+    renderWizardStep();
+  }
+
+  function agendaLookupWod() {
+    var wordEl = $("wz-wotd-word");
+    var word = wordEl ? wordEl.value.trim() : "";
+    wizardData.wordOfTheDay = word;
+    if (!word) {
+      agendaSkipWod();
+      return;
+    }
+
+    wizardStep = 3;
+    var body = $("wizard-body");
+    body.innerHTML = '<div class="wz-loading"><div class="loading-spinner"></div><p class="wz-loading-text">Looking up "' + escapeHtml(word) + '"...</p></div>';
+
+    $("wizard-progress-fill").style.width = "60%";
+    $("wizard-step-label").textContent = "Step 3 of 5";
+    $("wizard-title").textContent = "Choose Definition";
+
+    google.script.run
+      .withSuccessHandler(function (result) {
+        if (result.error) {
+          body.innerHTML = '<div class="wz-card"><p style="color:var(--red-text);">' + escapeHtml(result.error) + '</p></div>' +
+            '<div class="wz-btn-row"><button class="wz-btn wz-btn-primary" onclick="App.wizardNext()">Continue without definition</button></div>';
+          return;
+        }
+        wizardData.definitions = result.definitions || [];
+        renderWodPicker();
+      })
+      .withFailureHandler(function (err) {
+        body.innerHTML = '<div class="wz-card"><p>Could not look up the word. Continuing without a definition.</p></div>' +
+          '<div class="wz-btn-row"><button class="wz-btn wz-btn-primary" onclick="App.wizardNext()">Continue</button></div>';
+      })
+      .lookupWodDefinitions(word, wizardData.theme || "");
+  }
+
+  function renderWodPicker() {
+    var body = $("wizard-body");
+    var defs = wizardData.definitions || [];
+    if (defs.length === 0) {
+      body.innerHTML = '<div class="wz-card"><p>No definitions found.</p></div>' +
+        '<div class="wz-btn-row"><button class="wz-btn wz-btn-primary" onclick="App.wizardNext()">Continue</button></div>';
+      return;
+    }
+
+    var html = '<p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Choose a definition for "' + escapeHtml(wizardData.wordOfTheDay) + '":</p>';
+    defs.forEach(function (d, i) {
+      var isGemini = d.source !== "mw";
+      var sourceLabel = d.source === "mw" ? "Merriam-Webster" : "Gemini AI";
+      var sourceClass = d.source === "mw" ? "mw" : "gemini";
+      var selClass = i === 0 ? " selected" : "";
+      html += '<div class="wz-def-card' + (isGemini ? " gemini" : "") + selClass + '" onclick="App.selectWodDef(' + i + ')" id="wz-def-' + i + '">' +
+        '<span class="wz-def-source ' + sourceClass + '">' + sourceLabel + '</span>' +
+        (d.pos ? '<span style="font-style:italic;font-size:12px;color:var(--text-muted);margin-left:6px;">(' + escapeHtml(d.pos) + ')</span>' : '') +
+        '<div class="wz-def-text">' + escapeHtml(d.def) + '</div>' +
+        (d.pronunciation ? '<div class="wz-def-meta">' + escapeHtml(d.pronunciation) + '</div>' : '') +
+        (d.ex ? '<div class="wz-def-meta">e.g. "' + escapeHtml(d.ex) + '"</div>' : '') +
+        '</div>';
+    });
+
+    // Manual entry option
+    html += '<div class="wz-card" style="margin-top:12px;">' +
+      '<label class="wz-label">Or type your own definition</label>' +
+      '<textarea class="wz-textarea" id="wz-manual-def" placeholder="Custom definition" oninput="App.clearDefSelection()"></textarea>' +
+      '</div>';
+
+    html += '<div class="wz-btn-row"><button class="wz-btn wz-btn-primary" onclick="App.confirmWodSelection()">Use This Definition</button></div>';
+
+    // Store selected index
+    wizardData.selectedDefIndex = 0;
+    body.innerHTML = html;
+  }
+
+  function selectWodDef(idx) {
+    document.querySelectorAll(".wz-def-card").forEach(function (el) { el.classList.remove("selected"); });
+    var el = $("wz-def-" + idx);
+    if (el) el.classList.add("selected");
+    wizardData.selectedDefIndex = idx;
+    var manDef = $("wz-manual-def");
+    if (manDef) manDef.value = "";
+  }
+
+  function clearDefSelection() {
+    document.querySelectorAll(".wz-def-card").forEach(function (el) { el.classList.remove("selected"); });
+    wizardData.selectedDefIndex = -1;
+  }
+
+  function confirmWodSelection() {
+    var manDef = $("wz-manual-def");
+    var customDef = manDef ? manDef.value.trim() : "";
+
+    if (customDef) {
+      wizardData.wotdDefinition = customDef;
+      wizardData.wotdPronunciation = "";
+      wizardData.wotdPartOfSpeech = "";
+      wizardData.wotdExample = "";
+      wizardData.wotdSource = "manual";
+    } else if (wizardData.selectedDefIndex >= 0 && wizardData.definitions[wizardData.selectedDefIndex]) {
+      var chosen = wizardData.definitions[wizardData.selectedDefIndex];
+      wizardData.wotdDefinition = chosen.def;
+      wizardData.wotdPronunciation = chosen.pronunciation || "";
+      wizardData.wotdPartOfSpeech = chosen.pos || "";
+      wizardData.wotdExample = chosen.ex || "";
+      wizardData.wotdSource = chosen.source || "";
+    } else {
+      showToast("Please select or enter a definition", "error");
+      return;
+    }
+
+    wizardStep = 4;
+    renderWizardStep();
+  }
+
+  function renderSpeechConfirmation() {
+    var body = $("wizard-body");
+    if (!wizardData.agendaResult) {
+      body.innerHTML = '<div class="wz-card"><p>No speech data available.</p></div>';
+      return;
+    }
+    var speeches = wizardData.agendaResult.speeches || [];
+    if (speeches.length === 0) {
+      body.innerHTML = '<div class="wz-card"><p>No prepared speeches for this meeting.</p></div>' +
+        '<div class="wz-btn-row"><button class="wz-btn wz-btn-primary" onclick="App.wizardNext()">Generate Agenda</button></div>';
+      wizardData.keptSpeechKeys = [];
+      wizardData.keptEvaluatorKeys = [];
+      wizardData.scanInbox = false;
+      return;
+    }
+
+    // Default scanInbox to false if not set
+    if (wizardData.scanInbox === undefined) wizardData.scanInbox = false;
+
+    var html = '';
+
+    // Inbox scan toggle
+    html += '<div class="wz-card inbox-scan-card">' +
+      '<div class="inbox-scan-toggle-row">' +
+      '<div class="inbox-scan-label-wrap">' +
+      '<span class="inbox-scan-label">Scan Gmail for speech details</span>' +
+      '<span class="inbox-scan-subtitle">Searches your inbox for emails from speakers about their upcoming speeches to auto-fill titles and topics.</span>' +
+      '</div>' +
+      '<label class="toggle-switch">' +
+      '<input type="checkbox" id="wz-scan-inbox-toggle"' + (wizardData.scanInbox ? ' checked' : '') + ' onchange="App.toggleInboxScan(this.checked)">' +
+      '<span class="toggle-slider"></span>' +
+      '</label>' +
+      '</div>' +
+      '<div id="wz-scan-status"></div>' +
+      '</div>';
+
+    html += '<p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Uncheck any speeches that should not appear on the agenda:</p>';
+    html += '<div id="wz-speech-list">';
+    speeches.forEach(function (s, i) {
+      var flagged = s.isRed || s.isTbd;
+      var checked = !flagged;
+      var emailBadge = '';
+      if (wizardData.inboxScanResults && wizardData.inboxScanResults[s.key]) {
+        emailBadge = '<span class="email-found-badge">Found via email</span>';
+      }
+      html += '<div class="wz-check-row' + (flagged ? ' flagged' : ' checked') + '" id="wz-speech-row-' + i + '" onclick="var cb=document.getElementById(\'wz-speech-cb-' + i + '\');cb.checked=!cb.checked;App.updateSpeechRow(' + i + ')">' +
+        '<input type="checkbox" id="wz-speech-cb-' + i + '"' + (checked ? ' checked' : '') + ' onclick="event.stopPropagation();App.updateSpeechRow(' + i + ')">' +
+        '<span class="check-label">' + escapeHtml(s.key) + ' - <span class="check-name">' + escapeHtml(s.name || "TBD") + '</span>' +
+        (wizardData.inboxScanResults && wizardData.inboxScanResults[s.key] && wizardData.inboxScanResults[s.key].title ? '<span class="email-detail-line">' + escapeHtml(wizardData.inboxScanResults[s.key].title) + '</span>' : '') +
+        '</span>' +
+        emailBadge +
+        '<span class="check-badge ' + (flagged ? 'warn' : 'ok') + '">' + (flagged ? 'Flagged' : 'OK') + '</span>' +
+        '</div>';
+    });
+    html += '</div>';
+
+    html += '<div class="wz-btn-row"><button class="wz-btn wz-btn-primary" onclick="App.wizardNext()">Generate Agenda</button></div>';
+    body.innerHTML = html;
+
+    // If scan was already done, show the status
+    if (wizardData.scanInbox && wizardData.inboxScanDone) {
+      var statusEl = $("wz-scan-status");
+      if (statusEl) {
+        var foundCount = wizardData.inboxScanFoundKeys ? wizardData.inboxScanFoundKeys.length : 0;
+        if (foundCount > 0) {
+          statusEl.innerHTML = '<div class="inbox-scan-result success">' + foundCount + ' speaker email' + (foundCount !== 1 ? 's' : '') + ' found and applied.</div>';
+        } else {
+          statusEl.innerHTML = '<div class="inbox-scan-result empty">No matching emails found. Speech details will use what is in the schedule.</div>';
+        }
+      }
+    }
+  }
+
+  function toggleInboxScan(checked) {
+    wizardData.scanInbox = checked;
+    if (checked && !wizardData.inboxScanDone) {
+      // Trigger scan
+      var statusEl = $("wz-scan-status");
+      if (statusEl) {
+        statusEl.innerHTML = '<div class="inbox-scan-loading"><div class="loading-spinner" style="width:18px;height:18px;border-width:2px;"></div><span>Scanning inbox for speaker emails...</span></div>';
+      }
+
+      // Collect current speech keys
+      var speeches = wizardData.agendaResult ? wizardData.agendaResult.speeches || [] : [];
+      var speechKeys = speeches.filter(function(s) { return !s.isRed && !s.isTbd; }).map(function(s) { return s.key; });
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          wizardData.inboxScanDone = true;
+          if (result.error) {
+            if (statusEl) statusEl.innerHTML = '<div class="inbox-scan-result empty">' + escapeHtml(result.error) + '</div>';
+            return;
+          }
+          wizardData.inboxScanResults = result.details || {};
+          wizardData.inboxScanFoundKeys = result.foundKeys || [];
+
+          // Re-render to show badges
+          renderSpeechConfirmation();
+        })
+        .withFailureHandler(function(err) {
+          wizardData.inboxScanDone = true;
+          if (statusEl) statusEl.innerHTML = '<div class="inbox-scan-result empty">Scan failed: ' + escapeHtml(err.message) + '</div>';
+        })
+        .scanSpeakerInbox(wizardData.selectedDate, speechKeys);
+    }
+  }
+
+  function updateSpeechRow(i) {
+    var cb = $("wz-speech-cb-" + i);
+    var row = $("wz-speech-row-" + i);
+    if (!cb || !row) return;
+    if (cb.checked) {
+      row.classList.remove("flagged");
+      row.classList.add("checked");
+    } else {
+      row.classList.remove("checked");
+      row.classList.add("flagged");
+    }
+  }
+
+  function renderAgendaGenerate() {
+    var body = $("wizard-body");
+    collectSpeechSelections();
+    body.innerHTML = '<div class="wz-loading"><div class="loading-spinner"></div><p class="wz-loading-text">Generating agenda document...<br><span style="font-size:12px;">This may take a moment</span></p></div>';
+
+    google.script.run
+      .withSuccessHandler(function (result) {
+        if (result.error) {
+          body.innerHTML =
+            '<div class="wz-error">' +
+            '<div class="wz-error-circle"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>' +
+            '<h3>Generation Failed</h3><p>' + escapeHtml(result.error) + '</p></div>' +
+            '<div class="wz-btn-row"><button class="wz-btn wz-btn-outline" onclick="App.showView(\'admin\')">Back to Admin</button></div>';
+          return;
+        }
+        var agendaUrl = result.agendaUrl || "";
+        var introUrl = result.introUrl || "";
+        body.innerHTML =
+          '<div class="wz-success">' +
+          '<div class="wz-success-circle"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div>' +
+          '<h3>Agenda Created!</h3>' +
+          '<p>The meeting agenda has been saved to Google Drive.</p>' +
+          (agendaUrl ? '<p style="margin-top:10px;"><a href="' + escapeHtml(agendaUrl) + '" target="_blank">Open Agenda Document</a></p>' : '') +
+          (introUrl ? '<p style="margin-top:6px;"><a href="' + escapeHtml(introUrl) + '" target="_blank">Open Speaker Introductions</a></p>' : '') +
+          '</div>' +
+          '<div class="wz-btn-row"><button class="wz-btn wz-btn-outline" onclick="App.showView(\'admin\')">Done</button></div>';
+      })
+      .withFailureHandler(function (err) {
+        body.innerHTML =
+          '<div class="wz-error">' +
+          '<div class="wz-error-circle"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>' +
+          '<h3>Error</h3><p>' + escapeHtml(err.message) + '</p></div>' +
+          '<div class="wz-btn-row"><button class="wz-btn wz-btn-outline" onclick="App.showView(\'admin\')">Back to Admin</button></div>';
+      })
+      .generateAgendaFromApp({
+        dateStr: wizardData.selectedDate,
+        wordOfTheDay: wizardData.wordOfTheDay || "",
+        wotdPronunciation: wizardData.wotdPronunciation || "",
+        wotdPartOfSpeech: wizardData.wotdPartOfSpeech || "",
+        wotdDefinition: wizardData.wotdDefinition || "",
+        wotdExample: wizardData.wotdExample || "",
+        wotdSource: wizardData.wotdSource || "",
+        keptSpeechKeys: wizardData.keptSpeechKeys || [],
+        keptEvaluatorKeys: wizardData.keptEvaluatorKeys || [],
+        scanInbox: wizardData.scanInbox || false
+      });
+  }
+
+
+  // ═══════════════════════════════════════════════════════════
+  // WIZARD: Draft Club Email
+  // ═══════════════════════════════════════════════════════════
+
+  function collectClubEmailData() {
+    if (wizardStep === 1) {
+      var dateEl = $("wz-email-date");
+      var themeEl = $("wz-email-theme");
+      var wotdEl = $("wz-email-wotd");
+      var agendaEl = $("wz-email-agenda-url");
+      var guestEl = $("wz-email-guests");
+
+      if (dateEl) wizardData.selectedDate = dateEl.value;
+      if (themeEl) wizardData.theme = themeEl.value.trim();
+      if (wotdEl) wizardData.wotd = wotdEl.value.trim();
+      if (agendaEl) wizardData.agendaUrl = agendaEl.value.trim();
+      if (guestEl) wizardData.guestEmails = guestEl.value.trim();
+
+      var fmtRadio = document.querySelector('input[name="wz-email-format"]:checked');
+      if (fmtRadio) wizardData.meetingFormat = fmtRadio.value;
+      var guestModeRadio = document.querySelector('input[name="wz-email-guestmode"]:checked');
+      if (guestModeRadio) wizardData.guestMode = guestModeRadio.value;
+    }
+  }
+
+  function renderClubEmailStep() {
+    var body = $("wizard-body");
+
+    if (wizardStep === 1) {
+      // Step 1: Form with all fields (load data first if not loaded)
+      if (!wizardData.emailDataLoaded) {
+        body.innerHTML = '<div class="wz-loading"><div class="loading-spinner"></div><p class="wz-loading-text">Loading meeting data...</p></div>';
+        var dateToUse = wizardData.selectedDate || (scheduleData && scheduleData.meetings && scheduleData.meetings.length > 0 ? scheduleData.meetings[0].date : "");
+
+        google.script.run
+          .withSuccessHandler(function (result) {
+            if (result.error) {
+              body.innerHTML = '<div class="wz-card"><p style="color:var(--red-text);">' + escapeHtml(result.error) + '</p></div>';
+              return;
+            }
+            wizardData.emailResult = result;
+            wizardData.emailDataLoaded = true;
+            wizardData.selectedDate = wizardData.selectedDate || result.selectedDate || dateToUse;
+            wizardData.theme = result.theme || "";
+            wizardData.wotd = result.wotd || "";
+            wizardData.wotdDef = result.wotdDef || "";
+            wizardData.wotdEx = result.wotdEx || "";
+            wizardData.agendaUrl = result.agendaUrl || "";
+            wizardData.meetingFormat = result.meetingFormat || "hybrid";
+            wizardData.speakers = result.speakers || [];
+            wizardData.allDates = result.allDates || [];
+            wizardData.perDateData = result.perDateData || {};
+            renderClubEmailForm();
+          })
+          .withFailureHandler(function (err) {
+            body.innerHTML = '<div class="wz-card"><p style="color:var(--red-text);">Error: ' + escapeHtml(err.message) + '</p></div>';
+          })
+          .getClubEmailData(dateToUse);
+      } else {
+        renderClubEmailForm();
+      }
+
+    } else if (wizardStep === 2) {
+      // Step 2: Draft with AI
+      renderClubEmailDraft();
+
+    } else if (wizardStep === 3) {
+      // Step 3: Success
+      // Handled by renderClubEmailDraft success callback
+    }
+  }
+
+  function renderClubEmailForm() {
+    var body = $("wizard-body");
+    var dates = wizardData.allDates || [];
+    var fmt = wizardData.meetingFormat || "hybrid";
+
+    body.innerHTML =
+      '<div class="wz-card">' +
+      '<label class="wz-label">Meeting Date</label>' +
+      '<select class="wz-select" id="wz-email-date" onchange="App.emailDateChanged(this.value)">' +
+      dates.map(function (d) {
+        return '<option value="' + d + '"' + (d === wizardData.selectedDate ? ' selected' : '') + '>' + d + ' - ' + formatDateNice(d) + '</option>';
+      }).join("") +
+      '</select></div>' +
+
+      '<div class="wz-card">' +
+      '<label class="wz-label">Theme</label>' +
+      '<input class="wz-input" id="wz-email-theme" value="' + escapeHtml(wizardData.theme || "") + '" placeholder="Meeting theme">' +
+      '</div>' +
+
+      '<div class="wz-card">' +
+      '<label class="wz-label">Meeting Format</label>' +
+      '<div class="wz-radio-group">' +
+      ['hybrid', 'in_person', 'virtual', 'undecided'].map(function (v) {
+        var label = v === 'in_person' ? 'In Person' : v.charAt(0).toUpperCase() + v.slice(1);
+        return '<label class="wz-radio-option' + (v === fmt ? ' selected' : '') + '" onclick="this.querySelector(\'input\').checked=true;document.querySelectorAll(\'#wz-email-format-group .wz-radio-option\').forEach(function(o){o.classList.remove(\'selected\')});this.classList.add(\'selected\')">' +
+          '<input type="radio" name="wz-email-format" value="' + v + '"' + (v === fmt ? ' checked' : '') + '>' +
+          '<span>' + label + '</span></label>';
+      }).join("") +
+      '</div></div>' +
+
+      '<div class="wz-card">' +
+      '<label class="wz-label">Word of the Day (optional)</label>' +
+      '<input class="wz-input" id="wz-email-wotd" value="' + escapeHtml(wizardData.wotd || "") + '" placeholder="e.g. Convivial">' +
+      '</div>' +
+
+      '<div class="wz-card">' +
+      '<label class="wz-label">Agenda URL (optional)</label>' +
+      '<input class="wz-input" id="wz-email-agenda-url" value="' + escapeHtml(wizardData.agendaUrl || "") + '" placeholder="https://drive.google.com/...">' +
+      '</div>' +
+
+      '<div class="wz-card">' +
+      '<label class="wz-label">Guest CC/BCC (optional)</label>' +
+      '<input class="wz-input" id="wz-email-guests" value="' + escapeHtml(wizardData.guestEmails || "") + '" placeholder="guest@example.com, another@example.com">' +
+      '<div class="wz-radio-group" style="margin-top:8px;">' +
+      '<label class="wz-radio-option selected" onclick="this.querySelector(\'input\').checked=true;document.querySelectorAll(\'[name=wz-email-guestmode]\').forEach(function(r){r.closest(\'.wz-radio-option\').classList.remove(\'selected\')});this.classList.add(\'selected\')">' +
+      '<input type="radio" name="wz-email-guestmode" value="cc" checked><span>CC</span></label>' +
+      '<label class="wz-radio-option" onclick="this.querySelector(\'input\').checked=true;document.querySelectorAll(\'[name=wz-email-guestmode]\').forEach(function(r){r.closest(\'.wz-radio-option\').classList.remove(\'selected\')});this.classList.add(\'selected\')">' +
+      '<input type="radio" name="wz-email-guestmode" value="bcc"><span>BCC</span></label>' +
+      '</div></div>' +
+
+      '<div class="wz-btn-row"><button class="wz-btn wz-btn-secondary" onclick="App.wizardNext()">Draft with AI</button></div>';
+  }
+
+  function emailDateChanged(newDate) {
+    wizardData.selectedDate = newDate;
+    var pd = wizardData.perDateData || {};
+    if (pd[newDate]) {
+      var themeEl = $("wz-email-theme");
+      var wotdEl = $("wz-email-wotd");
+      var agendaEl = $("wz-email-agenda-url");
+      if (themeEl) themeEl.value = pd[newDate].theme || "";
+      if (wotdEl) wotdEl.value = "";
+      if (agendaEl) agendaEl.value = "";
+      wizardData.speakers = pd[newDate].speakers || [];
+      // Update format radio
+      var fmt = pd[newDate].meetingFormat || "hybrid";
+      var radios = document.querySelectorAll('input[name="wz-email-format"]');
+      radios.forEach(function (r) {
+        r.checked = (r.value === fmt);
+        var opt = r.closest(".wz-radio-option");
+        if (opt) opt.classList.toggle("selected", r.value === fmt);
+      });
+    }
+  }
+
+  function renderClubEmailDraft() {
+    var body = $("wizard-body");
+    collectClubEmailData();
+    body.innerHTML = '<div class="wz-loading"><div class="loading-spinner"></div><p class="wz-loading-text">Drafting email with Gemini AI...<br><span style="font-size:12px;">This may take a moment</span></p></div>';
+
+    google.script.run
+      .withSuccessHandler(function (result) {
+        if (result.error) {
+          body.innerHTML =
+            '<div class="wz-error">' +
+            '<div class="wz-error-circle"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>' +
+            '<h3>Draft Failed</h3><p>' + escapeHtml(result.error) + '</p></div>' +
+            '<div class="wz-btn-row"><button class="wz-btn wz-btn-outline" onclick="App.showView(\'admin\')">Back to Admin</button></div>';
+          return;
+        }
+        wizardStep = 3;
+        $("wizard-progress-fill").style.width = "100%";
+        $("wizard-step-label").textContent = "Step 3 of 3";
+        $("wizard-title").textContent = "Done";
+
+        body.innerHTML =
+          '<div class="wz-success">' +
+          '<div class="wz-success-circle"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div>' +
+          '<h3>Draft Saved!</h3>' +
+          '<p>Your club meeting email has been saved to Gmail Drafts.</p>' +
+          '<p style="margin-top:10px;"><a href="' + escapeHtml(result.draftsUrl || "https://mail.google.com/mail/#drafts") + '" target="_blank">Open Gmail Drafts</a></p>' +
+          '</div>' +
+          '<div class="wz-btn-row"><button class="wz-btn wz-btn-outline" onclick="App.showView(\'admin\')">Done</button></div>';
+      })
+      .withFailureHandler(function (err) {
+        body.innerHTML =
+          '<div class="wz-error">' +
+          '<div class="wz-error-circle"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>' +
+          '<h3>Error</h3><p>' + escapeHtml(err.message) + '</p></div>' +
+          '<div class="wz-btn-row"><button class="wz-btn wz-btn-outline" onclick="App.showView(\'admin\')">Back to Admin</button></div>';
+      })
+      .draftClubEmail({
+        dateStr: wizardData.selectedDate,
+        theme: wizardData.theme || "",
+        wotd: wizardData.wotd || "",
+        wotdDef: wizardData.wotdDef || "",
+        wotdEx: wizardData.wotdEx || "",
+        agendaUrl: wizardData.agendaUrl || "",
+        guestEmails: wizardData.guestEmails || "",
+        guestMode: wizardData.guestMode || "cc",
+        meetingFormat: wizardData.meetingFormat || "hybrid",
+        speakers: wizardData.speakers || [],
+        longDate: formatDateLong(wizardData.selectedDate)
+      });
+  }
+
+
+  // ── Utility ──
+  function escapeHtml(str) {
+    if (!str) return "";
+    var div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  // ── Initialize ──
+  function init() {
+    // Identity is resolved server-side via Session.getActiveUser() under
+    // "Execute as: User accessing the web app" — no client-side sign-in
+    // dance needed.
+    loadData(function () {
+      showView("schedule");
+    });
+  }
+
+  // ── Public API ──
+  return {
+    init: init,
+    refresh: refresh,
+    showView: showView,
+    showMeeting: showMeeting,
+    confirmRole: confirmRole,
+    startWizard: startWizard,
+    wizardBack: wizardBack,
+    wizardNext: wizardNext,
+    agendaLoadData: agendaLoadData,
+    agendaSkipWod: agendaSkipWod,
+    agendaLookupWod: agendaLookupWod,
+    selectWodDef: selectWodDef,
+    clearDefSelection: clearDefSelection,
+    confirmWodSelection: confirmWodSelection,
+    updateSpeechRow: updateSpeechRow,
+    toggleInboxScan: toggleInboxScan,
+    emailDateChanged: emailDateChanged,
+    allRolesDateChanged: allRolesDateChanged,
+  };
+})();
+
+// Boot the app
+document.addEventListener("DOMContentLoaded", App.init);
+</script>

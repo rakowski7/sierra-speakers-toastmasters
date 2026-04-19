@@ -1,0 +1,61 @@
+// Sierra Speakers Toastmasters — Service Worker
+// Provides offline caching for the PWA shell and "Add to Home Screen" capability.
+//
+// NOTE: Google Apps Script web apps serve content from a sandboxed iframe,
+// so the service worker scope is limited. This provides basic caching for
+// the app shell assets and a fallback offline page.
+
+const CACHE_NAME = 'sierra-speakers-v1';
+
+// Install event — cache the app shell
+self.addEventListener('install', function(event) {
+  self.skipWaiting();
+});
+
+// Activate event — clean old caches
+self.addEventListener('activate', function(event) {
+  event.waitUntil(
+    caches.keys().then(function(cacheNames) {
+      return Promise.all(
+        cacheNames.filter(function(name) {
+          return name !== CACHE_NAME;
+        }).map(function(name) {
+          return caches.delete(name);
+        })
+      );
+    })
+  );
+  self.clients.claim();
+});
+
+// Fetch event — network-first strategy with cache fallback
+self.addEventListener('fetch', function(event) {
+  // Only handle GET requests
+  if (event.request.method !== 'GET') return;
+
+  event.respondWith(
+    fetch(event.request)
+      .then(function(response) {
+        // Cache successful responses
+        if (response.status === 200) {
+          const responseClone = response.clone();
+          caches.open(CACHE_NAME).then(function(cache) {
+            cache.put(event.request, responseClone);
+          });
+        }
+        return response;
+      })
+      .catch(function() {
+        // Serve from cache if network fails
+        return caches.match(event.request).then(function(response) {
+          return response || new Response(
+            '<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:40px;">' +
+            '<h2>You are offline</h2><p>Please check your connection and try again.</p>' +
+            '<button onclick="location.reload()" style="padding:10px 20px;margin-top:16px;border-radius:8px;border:none;background:#1B2A4A;color:white;cursor:pointer;">Retry</button>' +
+            '</body></html>',
+            { headers: { 'Content-Type': 'text/html' } }
+          );
+        });
+      })
+  );
+});

@@ -460,7 +460,7 @@ function startRoleConfirmations() {
     const bgColor   = backgrounds[row][0];
     if (bgColor === "#cfe2f3" || (!firstName && !email)) break;
     if (firstName && lastName && email) {
-      nameToEmail[`${firstName.trim()} ${lastName.trim()}`] = email.trim();
+      nameToEmail[`${firstName.trim()} ${lastName.trim()}`] = normalizeEmail_(email);
     }
     row++;
   }
@@ -2390,7 +2390,7 @@ function generateAgenda() {
     while (r < data.length) {
       const firstName = data[r][0]?.toString().trim();
       const lastName  = data[r][1]?.toString().trim();
-      const email     = data[r][4]?.toString().trim();
+      const email     = normalizeEmail_(data[r][4]);
       const bgColor   = backgrounds[r]?.[0];
       if (bgColor === "#cfe2f3" || (!firstName && !email)) break;
       if (firstName && lastName && email) {
@@ -4425,7 +4425,7 @@ function debugSpeakerScan() {
   while (r < data.length) {
     const firstName = data[r][0]?.toString().trim();
     const lastName  = data[r][1]?.toString().trim();
-    const email     = data[r][4]?.toString().trim();
+    const email     = normalizeEmail_(data[r][4]);
     const bgColor   = backgrounds[r]?.[0];
     if (bgColor === "#cfe2f3" || (!firstName && !email)) break;
     if (firstName && lastName && email) nameToEmail[firstName + " " + lastName] = email;
