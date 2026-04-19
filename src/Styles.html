@@ -1382,6 +1382,7 @@ html, body {
 }
 
 .nav-btn {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1396,7 +1397,26 @@ html, body {
   transition: color 0.2s;
   -webkit-tap-highlight-color: transparent;
 }
-.nav-btn.active { color: var(--navy); }
+.nav-btn.active {
+  color: var(--green);
+  font-weight: 700;
+}
+.nav-btn.active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 32px;
+  height: 3px;
+  background: var(--green);
+  border-radius: 0 0 3px 3px;
+}
+.nav-btn:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
 .nav-btn:active { transform: scale(0.92); }
 
 /* ═══════════ EMPTY STATE ═══════════ */
@@ -1431,6 +1451,9 @@ html, body {
   }
   #app-header { box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
   #bottom-nav { box-shadow: 0 -2px 8px rgba(0,0,0,0.3); }
+  .nav-btn.active { color: var(--green-light); }
+  .nav-btn.active::before { background: var(--green-light); }
+  .nav-btn:focus-visible { outline-color: var(--green-light); }
   .role-chip.unconfirmed { background: #2f3336; border-color: #444; }
   .admin-date-picker select { background: #1c2533; color: var(--text); }
   .toggle-slider { background: #555; }
