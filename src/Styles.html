@@ -206,12 +206,14 @@ html, body {
 .my-role-name {
   font-weight: 600;
   font-size: 14px;
-  color: var(--text);
+  /* Explicit dark color: this card always sits on the pale --green-bg,
+     so theme text vars (which flip light in dark mode) would vanish. */
+  color: #1a1a1a;
 }
 
 .my-role-date {
   font-size: 12px;
-  color: var(--text-secondary);
+  color: #555;
   margin-top: 1px;
 }
 
@@ -534,7 +536,8 @@ html, body {
 
 .confirm-role-meeting {
   font-size: 13px;
-  color: var(--text-secondary);
+  /* Always on pale --green-bg card; keep text dark for both themes. */
+  color: #555;
 }
 
 .confirm-action-btn {
@@ -798,6 +801,8 @@ html, body {
 .wz-radio-option.selected {
   border-color: var(--navy);
   background: var(--blue-bg);
+  /* Selected option sits on pale --blue-bg; force dark text for dark mode. */
+  color: #1a1a1a;
 }
 .wz-radio-option input[type="radio"] {
   width: 16px;
@@ -1051,6 +1056,9 @@ html, body {
   margin-top: 4px;
   font-style: italic;
 }
+/* A selected def card sits on a pale pastel bg; keep its text dark in both themes. */
+.wz-def-card.selected .wz-def-text { color: #1a1a1a; }
+.wz-def-card.selected .wz-def-meta { color: #555; }
 
 /* Checkbox rows for speech confirmation */
 .wz-check-row {
@@ -1068,6 +1076,9 @@ html, body {
 .wz-check-row:active { transform: scale(0.99); }
 .wz-check-row.checked { background: var(--green-bg); border-color: var(--green-border); }
 .wz-check-row.flagged { background: var(--red-bg); border-color: var(--red-border); }
+/* Checked/flagged rows sit on pale pastel bgs; keep the label dark in both themes. */
+.wz-check-row.checked .check-label,
+.wz-check-row.flagged .check-label { color: #1a1a1a; }
 .wz-check-row input[type="checkbox"] {
   width: 18px;
   height: 18px;
@@ -1458,5 +1469,10 @@ html, body {
   .admin-date-picker select { background: #1c2533; color: var(--text); }
   .toggle-slider { background: #555; }
   .inbox-scan-result.empty { background: #2f3336; color: var(--text-muted); }
+  /* The brand green (--green) is dark, so green accent headings go dim on the
+     dark card/background. Brighten them in dark mode only (light mode keeps --green). */
+  .banner-header,
+  .confirm-success h3,
+  .wz-success h3 { color: #5fc98a; }
 }
 </style>
