@@ -1076,9 +1076,11 @@ html, body {
 .wz-check-row:active { transform: scale(0.99); }
 .wz-check-row.checked { background: var(--green-bg); border-color: var(--green-border); }
 .wz-check-row.flagged { background: var(--red-bg); border-color: var(--red-border); }
-/* Checked/flagged rows sit on pale pastel bgs; keep the label dark in both themes. */
+/* Checked/flagged rows sit on pale pastel bgs; keep the label + name dark in both themes. */
 .wz-check-row.checked .check-label,
-.wz-check-row.flagged .check-label { color: #1a1a1a; }
+.wz-check-row.flagged .check-label,
+.wz-check-row.checked .check-name,
+.wz-check-row.flagged .check-name { color: #1a1a1a; }
 .wz-check-row input[type="checkbox"] {
   width: 18px;
   height: 18px;
@@ -1474,5 +1476,19 @@ html, body {
   .banner-header,
   .confirm-success h3,
   .wz-success h3 { color: #5fc98a; }
+  /* --navy is a dark text color; on the dark cards/background in dark mode it
+     becomes unreadable. Lighten the navy TEXT elements that sit on theme-aware
+     (dark) surfaces. (Navy text on hardcoded-light surfaces like
+     .roles-section-header / .all-roles-group-header is left alone — still readable.) */
+  .view-details-link,
+  .back-btn,
+  .section-header,
+  .wizard-title,
+  .wz-select,
+  .wz-btn-outline,
+  .wz-success a,
+  .all-roles-header,
+  .all-roles-dropdown,
+  .check-name { color: var(--text); }
 }
 </style>
