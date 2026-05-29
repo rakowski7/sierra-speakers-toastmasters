@@ -14,7 +14,7 @@
 
 // ── Configuration ───────────────────────────────────────────
 const WEBAPP_CONFIG_ = {
-  SPREADSHEET_ID: "1gLWiPXAzW_LXw-7_GDG7ykaGOB2faa3WcY6h18qH-rw",
+  SPREADSHEET_ID: "1BAQPmjadcvjnPOsj16H6y22Ls-t34EeY63jlGPHPGU4",
   ADMIN_EMAILS: [
     "rakowski.7@gmail.com",
     // Add other admin emails here
