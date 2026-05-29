@@ -4581,7 +4581,7 @@ function deployToAnotherSheet() {
   }
 
   // --- 3. Read all Script Properties from THIS project ---
-  const sourceProps = PropertiesService.getScriptProperties().getAll();
+  const sourceProps = PropertiesService.getScriptProperties().getProperties();
   const propKeys = Object.keys(sourceProps).sort();
 
   if (propKeys.length === 0) {
