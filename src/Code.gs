@@ -168,8 +168,6 @@ function shouldRefreshGemini_(cachedRow, currentTheme, currentModelLabel) {
     .addItem('Generate Meeting Agenda', 'generateAgenda')
     .addItem('Draft Club Meeting Email', 'sendClubHypeEmail')
     .addSeparator()
-    .addItem('Deploy Code to Another Sheet', 'deployToAnotherSheet')
-    .addSeparator()
     .addItem('Update AI Models', 'refreshModelRegistry_')
     .addToUi();
 }
